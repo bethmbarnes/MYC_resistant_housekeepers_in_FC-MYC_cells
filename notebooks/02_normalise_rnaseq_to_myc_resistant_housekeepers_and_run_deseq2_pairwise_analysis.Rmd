@@ -1,0 +1,414 @@
+---
+title: "Identifying MYC non-responders in Loven et al RNA-seq"
+output: html_notebook
+---
+
+# Description
+
+This notebook details how MYC-resistant housekeeping genes, identified in Loven et al., are incorporated into RNA-seq normalization using DESeq2. Two DESeq2 models are generated:
+
+1. Pairwise comparisons: Identifying genes differentially expressed between conditions.
+
+2. Interaction term model (next notebook): Detecting genes whose response to SAE inhibitor treatment depends on MYC status.
+
+## Load required libraries
+
+```{r}
+# load libraries
+suppressMessages({
+  library(tidyr)
+  library(magrittr)
+  library(ggplot2)
+  library(dplyr)
+  library(tibble)
+  library(gprofiler2)
+  library(stringr)
+  library(DESeq2)
+  library(ggrepel)
+  library(ComplexHeatmap)
+  library(limma)
+  })
+```
+
+## Housekeeping Genes
+
+```{r}
+# Load housekeeping genes identified in the first notebook
+ensg <- read.csv(file = "data/candidate_housekeeper_genes_from_Loven_RNAseq.csv")
+housekeeping_genes <- ensg$target
+rm(ensg)
+```
+
+
+## Sample Annotation and Raw Read Counts
+
+```{r}
+# sample annotation file
+targets <- read.csv(file="data/targets.csv", row.names=1)
+
+# gene annotation file and remove duplicate ensembl IDs
+gene_anno <- read.csv(file="data/RNAseq_gene_annotations.csv")
+gene_anno$GeneID <- str_replace(gene_anno$GeneID, pattern = ".[0-9]+$", replacement = "") # remove ensembl version number
+gene_anno <- gene_anno[!duplicated(gene_anno$GeneID), ]
+row.names(gene_anno) <- gene_anno$GeneID
+
+# raw read counts
+reads <- read.csv(file="data/reads.csv", row.names=1)
+rownames(reads) <- str_replace(rownames(reads), pattern = ".[0-9]+$", replacement = "") # remove ensembl version number
+
+# check target row names and reads column names match
+cat("Are samples in the targets and read count data frames in the same order: ", identical(row.names(targets), colnames(reads)), "\n")
+
+#read hallmark MYC targets gene lists
+MYC1 <- read.csv(file="data/geneset_MYC_V1.csv")
+myc1.lst <- list(MYC1$converted_alias)
+```
+## Deseq2 model with grouping factor (pair-wise comparisons)
+
+MYC status (High and low) and drug treatment (SAE2i and DMSO) are combined into one grouping variable (Group) that is suplied to deseq2. The line 'using pre-existing size factors' demonstrates that is pritned to console indicates that the control genes have been used for normalisation
+
+```{r}
+#create deseq data set
+dds_grouped <- DESeqDataSetFromMatrix(countData = reads,
+                              colData = targets,
+                              design = ~Group)
+
+# Extract counts for housekeeping genes
+hk_reads <- counts(dds_grouped)[row.names(dds_grouped) %in% housekeeping_genes, ]
+
+#remove genes whose combined expression is below 3
+hk_reads_filtered <- hk_reads %>%
+  as.data.frame() %>%
+  mutate(Gene = row.names(.)) %>%  # Save row names as a new column called Gene
+  rowwise() %>%
+  filter(sum(c_across(-Gene)) >= 3) %>%  # Exclude the Gene column from the sum
+  ungroup() %>%
+  column_to_rownames(var = "Gene")  # Convert Gene column back to row names
+
+# Extract ensembl IDs of housekeeping genes
+housekeeping_genes <- row.names(hk_reads_filtered)
+
+# Create index identifying rows of the reads stored in dds_grouped that correspond to house-keeping genes
+isControl <- rownames(dds_grouped) %in% housekeeping_genes
+
+# Estimate size factors using house-keeping genes as control genes
+dds_grouped <- estimateSizeFactors(dds_grouped, controlGenes = isControl)
+
+# Run DESeq2 analysis
+dds_grouped <- DESeq(dds_grouped)
+
+# check result names
+resultsNames(dds_grouped)
+```
+### PCA plot
+```{r}
+#variance stabilised transformed reads, with normalisation to MYC resistant house-keepers
+vsd <- vst(dds_grouped)
+
+#PCA
+pcaData <- plotPCA(vsd, intgroup=c("Group"), returnData=TRUE)
+write.csv(pcaData, file="output/PCA_data.csv")
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+#plot with ggplot
+PCA_plot <- ggplot(pcaData, aes(PC1, PC2, colour=targets$MYC)) +
+  geom_point(size=7, aes(alpha=factor(targets$Treatment), shape=targets$Repeat)) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  labs(shape="Repeat", alpha="Drug Treatment", colour = "MYC Status") +
+  theme_classic() +
+  scale_alpha_manual(values=c("DMSO"=0.2, "SAE2i"=0.9)) +
+  scale_colour_brewer(palette="Set1") +
+  scale_fill_brewer(palette="Set1") +
+  theme(legend.position="right", aspect.ratio=1)
+
+# Save the plot as PNG
+ggsave("output/PCA_plot.png", PCA_plot, width = 6, height = 4, dpi = 300)
+
+# Save the plot as PDF
+ggsave("output/PCA_plot.pdf", PCA_plot, width = 6, height = 4)
+
+# Print to notebook
+print(PCA_plot)
+```
+
+### Deseq2 model with grouping factor (pair-wise comparisons)
+#### 1. High MYC versus low MYC (DMSO samples only): differential expression summary
+
+Identify genes with adjusted p value < 0.05 and summarise by table, annotate ensembl IDs with gene names and write output to CSV file.
+
+```{r}
+#extract specific condition of interest
+res_grouped_MYC <- results(dds_grouped, contrast = c("Group", "High_DMSO", "Low_DMSO"), alpha=0.05)
+
+# print a table to console
+summary(res_grouped_MYC)
+
+#Add gene name annotations and write to CSV file
+res_grouped_MYC_anno <- res_grouped_MYC %>%
+  as.data.frame() %>%
+  mutate(GeneID = rownames(.)) %>%
+  right_join(gene_anno, by = "GeneID") %>%
+  column_to_rownames(var = "GeneID") %T>%
+  write.csv(file = "output/results_grouped_high_MYC_versus_low_MYC_DMSO_only.csv")
+
+```
+
+#### 1. High MYC versus low MYC (DMSO samples only): Visualise the results by volcano plot
+
+```{r}
+#Colours for volcano plot points
+cols <- c("down" = "RoyalBlue", "up" = "red2", "not_sig" = "lightgrey")
+
+# Remove NAs and add factor for volcano plot up/down/not sig colouring
+res_grouped_MYC_volc <- res_grouped_MYC_anno %>%
+  na.omit() %>%
+  mutate(Group = case_when(log2FoldChange <= 0 & padj <= 0.05 ~ "down",
+                           log2FoldChange >= 0 &  padj <= 0.05 ~  "up",
+                           padj >= 0.05 ~ "not_sig"))
+
+# Labels for top ten most significant genes
+res_grouped_MYC_labs <- res_grouped_MYC_volc %>%
+  slice_min(padj, n = 10)
+
+res_grouped_MYC_plot <- ggplot(data = res_grouped_MYC_volc, aes(log2FoldChange, -log10(padj), colour=Group)) +
+  geom_point(alpha=0.8) +
+  geom_hline(yintercept=1.301029996, colour="grey", linetype="dashed") +
+  geom_vline(xintercept=0, colour="grey", linetype="dashed") +
+  xlab(paste0("Log fold-change")) +
+  ylab(paste0("-Log10(adjusted p value)")) + 
+  ggtitle("High MYC versus low MYC") +
+  theme_classic()+
+  scale_colour_manual(values= cols) +
+  geom_text_repel(data = res_grouped_MYC_labs, 
+                  aes(label = GeneSymbol), 
+                  size = 3, 
+                  box.padding = 0.3, 
+                  point.padding = 0.5, 
+                  max.overlaps = 10,
+                  min.segment.length = 0) +
+  coord_cartesian(xlim = c(-max(abs(res_grouped_MYC_volc$log2FoldChange)),
+                           max(abs(res_grouped_MYC_volc$log2FoldChange))))
+
+# Save the plot as PNG
+ggsave("output/volcano_grouped_high_MYC_versus_low_MYC_DMSO_only.png", res_grouped_MYC_plot, width = 6, height = 4, dpi = 300)
+
+# Save the plot as PDF
+ggsave("output/volcano_grouped_high_MYC_versus_low_MYC_DMSO_only.pdf", res_grouped_MYC_plot, width = 6, height = 4)
+
+# Print to notebook
+print(res_grouped_MYC_plot)
+```
+#### 1. High MYC versus low MYC (DMSO samples only): Hallmark MYC target gene enrichment and barcode plots
+
+The pairwise comparisons performed using the grouping variable method are analysed for Hallmark MYC target gene enrichment
+
+```{r}
+# Convert ensembl ID position of MYC target genes to index
+MYC1_ind <- ids2indices(myc1.lst, row.names(res_grouped_MYC_volc))
+
+# Gene set enrichment test by cameraPR
+cameraPR(res_grouped_MYC_volc$stat, index= MYC1_ind, use.ranks=T)
+```
+```{r echo=FALSE}
+# Save barcode plot as PNG
+png("output/barcodeplot_grouped_high_MYC_versus_low_MYC_DMSO_only.png", width = 800, height = 600)
+barcodeplot(res_grouped_MYC_volc$stat, index = MYC1_ind[[1]])
+invisible(dev.off())
+
+# Save barcode plot as PDF
+pdf("output/barcodeplot_grouped_high_MYC_versus_low_MYC_DMSO_only.pdf", width = 8, height = 6)
+barcodeplot(res_grouped_MYC_volc$stat, index = MYC1_ind[[1]])
+invisible(dev.off())
+```
+
+```{r}
+# print barcode plot to console
+barcodeplot(res_grouped_MYC_volc$stat, index = MYC1_ind[[1]])
+```
+
+### Deseq2 model with grouping factor (pair-wise comparisons): 
+#### 2. High MYC SAEi treatment versus DMSO: differential expression summary
+```{r}
+#extract specific condition of interest
+res_grouped_SAE2i_high <- results(dds_grouped, contrast = c("Group", "High_SAE2i", "High_DMSO"), alpha = 0.05)
+
+# print a table to console
+summary(res_grouped_SAE2i_high)
+
+#Add gene name annotations and write to CSV file
+res_grouped_SAE2i_high_anno <- res_grouped_SAE2i_high %>%
+  as.data.frame() %>%
+  mutate(GeneID = rownames(.)) %>%
+  right_join(gene_anno, by = "GeneID") %>%
+  column_to_rownames(var = "GeneID") %T>%
+  write.csv(file = "output/results_grouped_high_MYC_SAEi_versus_DMSO.csv")
+```
+
+#### 2. High MYC SAEi treatment versus DMSO: visualise the results by volcano plot
+
+```{r}
+#Colours for volcano plot points
+cols <- c("down" = "RoyalBlue", "up" = "red2", "not_sig" = "lightgrey")
+
+# Remove NAs and add factor for volcano plot up/down/not sig colouring
+res_grouped_SAE2i_high_volc <- res_grouped_SAE2i_high_anno %>%
+  na.omit() %>%
+  mutate(Group = case_when(log2FoldChange <= 0 & padj <= 0.05 ~ "down",
+                           log2FoldChange >= 0 &  padj <= 0.05 ~  "up",
+                           padj >= 0.05 ~ "not_sig"))
+
+# Labels for top ten most significant genes
+res_grouped_SAE2i_high_labs <- res_grouped_SAE2i_high_volc %>%
+  slice_min(padj, n = 10)
+
+res_grouped_SAE2i_high_plot <- ggplot(data = res_grouped_SAE2i_high_volc, aes(log2FoldChange, -log10(padj), colour=Group)) +
+  geom_point(alpha=0.8) +
+  geom_hline(yintercept=1.301029996, colour="grey", linetype="dashed") +
+  geom_vline(xintercept=0, colour="grey", linetype="dashed") +
+  xlab(paste0("Log fold-change")) +
+  ylab(paste0("-Log10(adjusted p value)")) + 
+  ggtitle("High MYC SAE2i versus DMSO") +
+  theme_classic()+
+  scale_colour_manual(values= cols) +
+  geom_text_repel(data = res_grouped_SAE2i_high_labs, 
+                  aes(label = GeneSymbol), 
+                  size = 3, 
+                  box.padding = 0.3, 
+                  point.padding = 0.5, 
+                  max.overlaps = 10,
+                  min.segment.length = 0) +
+  coord_cartesian(xlim = c(-max(abs(res_grouped_SAE2i_high_volc$log2FoldChange)),
+                           max(abs(res_grouped_SAE2i_high_volc$log2FoldChange))))
+
+# Print to notebook
+print(res_grouped_SAE2i_high_plot)
+
+# Save the plot as PNG
+ggsave("output/volcano_grouped_high_MYC_SAEi_versus_DMSO.png", res_grouped_SAE2i_high_plot, width = 6, height = 4, dpi = 300)
+
+# Save the plot as PDF
+ggsave("output/volcano_grouped_high_MYC_SAEi_versus_DMSO.pdf", res_grouped_SAE2i_high_plot, width = 6, height = 4)
+```
+
+#### 2. High MYC SAEi treatment versus DMSO: Hallmark MYC target gene enrichment and barcode plots
+
+The pairwise comparisons performed using the grouping variable method are analysed for Hallmark MYC target gene enrichment
+
+```{r}
+# Convert ensembl ID position of MYC target genes to index
+MYC1_ind <- ids2indices(myc1.lst, row.names(res_grouped_SAE2i_high_volc))
+
+# Gene set enrichment test by cameraPR
+cameraPR(res_grouped_SAE2i_high_volc$stat, index= MYC1_ind, use.ranks=T)
+```
+
+```{r echo=FALSE}
+# Save barcode plot as PNG
+png("output/barcodeplot_grouped_high_MYC_SAEi_versus_DMSO.png", width = 800, height = 600)
+barcodeplot(res_grouped_SAE2i_high_volc$stat, index = MYC1_ind[[1]])
+invisible(dev.off())
+
+# Save barcode plot as PDF
+pdf("output/barcodeplot_grouped_high_MYC_SAEi_versus_DMSO.pdf", width = 8, height = 6)
+barcodeplot(res_grouped_SAE2i_high_volc$stat, index = MYC1_ind[[1]])
+invisible(dev.off())
+```
+
+```{r}
+# print barcode plot to console
+barcodeplot(res_grouped_SAE2i_high_volc$stat, index = MYC1_ind[[1]])
+```
+### Deseq2 model with grouping factor (pair-wise comparisons): 
+#### 3. Low MYC - SAEi treatment versus DMSO: differential expression summary
+
+```{r}
+#extract specific condition of interest
+res_grouped_SAE2i_low <- results(dds_grouped, contrast = c("Group", "Low_SAE2i", "Low_DMSO"), alpha = 0.05)
+
+# print a table to console
+summary(res_grouped_SAE2i_low)
+
+#Add gene name annotations and write to CSV file
+res_grouped_SAE2i_low_anno <- res_grouped_SAE2i_low %>%
+  as.data.frame() %>%
+  mutate(GeneID = rownames(.)) %>%
+  right_join(gene_anno, by = "GeneID") %>%
+  column_to_rownames(var = "GeneID") %T>%
+  write.csv(file = "output/results_grouped_low_MYC_SAEi_versus_DMSO.csv")
+```
+
+#### 3. High MYC - SAE2i treatment versus DMSO: Visualise the results by volcano plot
+
+```{r}
+#Colours for volcano plot points
+cols <- c("down" = "RoyalBlue", "up" = "red2", "not_sig" = "lightgrey")
+
+# Remove NAs and add factor for volcano plot up/down/not sig colouring
+res_grouped_SAE2i_low_volc <- res_grouped_SAE2i_low_anno %>%
+  na.omit() %>%
+  mutate(Group = case_when(log2FoldChange <= 0 & padj <= 0.05 ~ "down",
+                           log2FoldChange >= 0 &  padj <= 0.05 ~  "up",
+                           padj >= 0.05 ~ "not_sig"))
+
+# Labels for top ten most significant genes
+res_grouped_SAE2i_low_labs <- res_grouped_SAE2i_low_volc %>%
+  slice_min(padj, n = 10)
+
+res_grouped_SAE2i_low_plot <- ggplot(data = res_grouped_SAE2i_low_volc, aes(log2FoldChange, -log10(padj), colour=Group)) +
+  geom_point(alpha=0.8) +
+  geom_hline(yintercept=1.301029996, colour="grey", linetype="dashed") +
+  geom_vline(xintercept=0, colour="grey", linetype="dashed") +
+  xlab(paste0("Log fold-change")) +
+  ylab(paste0("-Log10(adjusted p value)")) + 
+  ggtitle("Low MYC - SAE2 versus DMSO") +
+  theme_classic()+
+  scale_colour_manual(values= cols) +
+  geom_text_repel(data = res_grouped_SAE2i_low_labs, 
+                  aes(label = GeneSymbol), 
+                  size = 3, 
+                  box.padding = 0.3, 
+                  point.padding = 0.5, 
+                  max.overlaps = 10,
+                  min.segment.length = 0) +
+  coord_cartesian(xlim = c(-max(abs(res_grouped_SAE2i_low_volc$log2FoldChange)),
+                           max(abs(res_grouped_SAE2i_low_volc$log2FoldChange))))
+
+# Print to notebook
+print(res_grouped_SAE2i_low_plot)
+
+# Save the plot as PNG
+ggsave("output/volcano_grouped_low_MYC_SAEi_versus_DMSO.png", res_grouped_SAE2i_low_plot, width = 6, height = 4, dpi = 300)
+
+# Save the plot as PDF
+ggsave("output/volcano_grouped_low_MYC_SAEi_versus_DMSO.pdf", res_grouped_SAE2i_low_plot, width = 6, height = 4)
+```
+
+#### 3. Low MYC - SAEi treatment versus DMSO: Hallmark MYC target gene enrichment and barcode plots
+
+The pairwise comparisons performed using the grouping variable method are analysed for Hallmark MYC target gene enrichment
+
+```{r}
+# Convert ensembl ID position of MYC target genes to index
+MYC1_ind <- ids2indices(myc1.lst, row.names(res_grouped_SAE2i_low_volc))
+
+# Gene set enrichment test by cameraPR
+cameraPR(res_grouped_SAE2i_low_volc$stat, index= MYC1_ind, use.ranks=T)
+```
+
+```{r echo=FALSE}
+# Save barcode plot as PNG
+png("output/barcodeplot_grouped_low_MYC_SAEi_versus_DMSO.png", width = 800, height = 600)
+barcodeplot(res_grouped_SAE2i_low_volc$stat, index = MYC1_ind[[1]])
+invisible(dev.off())
+
+# Save barcode plot as PDF
+pdf("output/barcodeplot_grouped_low_MYC_SAEi_versus_DMSO.pdf", width = 8, height = 6)
+barcodeplot(res_grouped_SAE2i_low_volc$stat, index = MYC1_ind[[1]])
+invisible(dev.off())
+```
+
+```{r}
+# print barcode plot to console
+barcodeplot(res_grouped_SAE2i_low_volc$stat, index = MYC1_ind[[1]])
+```
