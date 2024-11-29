@@ -1,0 +1,13 @@
+Sample,Repeat,MYC,Treatment,Group
+RO1,A,Low,DMSO,Low_DMSO
+RO2,A,Low,SAE2i,Low_SAE2i
+RO3,A,High,DMSO,High_DMSO
+RO4,A,High,SAE2i,High_SAE2i
+RO5,B,Low,DMSO,Low_DMSO
+RO6,B,Low,SAE2i,Low_SAE2i
+RO7,B,High,DMSO,High_DMSO
+RO8,B,High,SAE2i,High_SAE2i
+RO9,C,Low,DMSO,Low_DMSO
+RO10,C,Low,SAE2i,Low_SAE2i
+RO11,C,High,DMSO,High_DMSO
+RO12,C,High,SAE2i,High_SAE2i
