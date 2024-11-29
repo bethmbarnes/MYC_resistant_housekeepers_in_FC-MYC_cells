@@ -26,8 +26,11 @@ The synthetic lethal relationship between MYC and SAE2 has been described previo
 ## Objectives
 
 1. **Identify MYC Non-Responders**: Use RNA-seq data from Loven *et al.* (2012) to identify genes resistant to MYC’s transcriptional amplifier effect. These genes serve as normalization references (housekeeping genes) for downstream analysis.
+   
 2. **Normalize RNA-seq Data**: Incorporate MYC-resistant housekeeping genes into the normalization process, replacing standard size factor estimation in DESeq2.
+
 3. **Analyze Differential Expression**:
    - Compare MYC-low vs. MYC-high cells under DMSO and SAEi treatments.
    - Investigate interaction effects of MYC status and SAEi treatment on gene expression.
+
 4. **Gene Set Enrichment Analysis**: Evaluate Hallmark MYC target genes for enrichment across conditions.
