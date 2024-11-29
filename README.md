@@ -16,13 +16,12 @@ The synthetic lethal relationship between MYC and SAE2 has been described previo
 - **Cell Model**: FC-MYC cells grown in MYC-low and MYC-high conditions.
   - MYC-low: 24 hours in the absence of tetracycline.
   - MYC-high: 24 hours in the presence of 500 ng/mL tetracycline.
+    
 - **Treatments**:
   - Vehicle control (DMSO).
   - SAEi ML-792 (25 nM).
+    
 - **Replicates**: Three biological replicates per condition.
-- **Complementary Analyses**:
-  - DNA content profiling by flow cytometry.
-  - MYC protein expression analysis by western blotting.
   
 ## Objectives
 
