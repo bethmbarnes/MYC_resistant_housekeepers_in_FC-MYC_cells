@@ -34,3 +34,7 @@ The synthetic lethal relationship between MYC and SAE2 has been described previo
    - Investigate interaction effects of MYC status and SAEi treatment on gene expression.
 
 4. **Gene Set Enrichment Analysis**: Evaluate Hallmark MYC target genes for enrichment across conditions.
+
+## Viewing rendedered files
+
+Download files from notebooks_rendered and open in web browser to see R code with rendered graphics
