@@ -1,0 +1,265 @@
+---
+title: "Deseq2 model with interaction term, normalised using MYC non-responders in Loven et al RNA-seq"
+output: html_notebook
+---
+
+#Description
+
+The genes identified in Loven et al. as being MYC resistant and potential house-keepers for our RNA-seq experiment are used as control genes during the normalisation step in deseq2, instead of the usual size factor estimation method.
+
+Two Deseq2 models are created, one with a grouping variable to allow identification of genes that are differentially expressed between each pairwise condition (previous notebook), and another that identifies the 'interaction term' (this notebook). The latter specifically is identifying genes that behave differently upon exposure to the SAE inhibitor, depending on the MYC level within the cells.
+
+# Load required libraries
+
+```{r}
+# load libraries
+suppressMessages({
+  library(tidyr)
+  library(magrittr)
+  library(ggplot2)
+  library(dplyr)
+  library(tibble)
+  library(gprofiler2)
+  library(stringr)
+  library(DESeq2)
+  library(ggrepel)
+  library(ComplexHeatmap)
+  })
+```
+
+## Import RNA-sequencing data
+
+First the sample annotation file (targets) and raw read counts (reads) supplied by the BCF at UoM are improted.
+
+```{r}
+# read house keeping gene list back in
+ensg <- read.csv(file="data/candidate_housekeeper_genes_from_Loven_RNAseq.csv")
+housekeeping_genes <- ensg$target
+rm(ensg)
+
+# read sample annotation file
+targets <- read.csv(file="data/targets.csv", row.names=1)
+
+# read gene annotation file and remove duplicate ensembl IDs
+gene_anno <- read.csv(file="data/RNAseq_gene_annotations.csv")
+gene_anno$GeneID <- str_replace(gene_anno$GeneID, pattern = ".[0-9]+$", replacement = "") # remove ensembl version number
+gene_anno <- gene_anno[!duplicated(gene_anno$GeneID), ]
+row.names(gene_anno) <- gene_anno$GeneID
+
+#import raw reads
+reads <- read.csv(file="data/reads.csv", row.names=1)
+rownames(reads) <- str_replace(rownames(reads), pattern = ".[0-9]+$", replacement = "") # remove ensembl version number
+
+# check target row names and reads column names match
+cat("Are samples in the targets and read count data frames in the same order: ", identical(row.names(targets), colnames(reads)), "\n")
+
+#read hallmark MYC targets gene lists
+MYC1 <- read.csv(file="data/geneset_MYC_V1.csv")
+myc1.lst <- list(MYC1$converted_alias)
+```
+
+## Deseq2 model with interaction term
+```{r}
+dds_interaction <- DESeqDataSetFromMatrix(countData = reads,
+                              colData = targets,
+                              design = ~MYC + Treatment + MYC:Treatment)
+
+# change reference/control groups
+
+dds_interaction$MYC <- relevel(dds_interaction$MYC, ref = "Low")
+dds_interaction$Treatment <- relevel(dds_interaction$Treatment, ref = "DMSO")
+
+isControl <- rownames(dds_interaction) %in% housekeeping_genes
+
+dds_interaction <- estimateSizeFactors(dds_interaction, controlGenes = isControl)
+
+# DESeq2 analysis
+dds_interaction <- DESeq(dds_interaction)
+
+# check result names
+resultsNames(dds_interaction)
+```
+### Deseq2 model with interaction term:
+#### MYC
+```{r}
+res_MYC <- results(dds_interaction, name = "MYC_High_vs_Low")
+
+#Add gene name annotations and write to CSV file
+res_MYC_anno <- res_MYC %>%
+  as.data.frame() %>%
+  mutate(GeneID = rownames(.)) %>%
+  right_join(gene_anno, by = "GeneID") %>%
+  column_to_rownames(var = "GeneID") %T>%
+  write.csv(file = "output/differential_expression_interaction_analysis/results_interaction_MYC.csv")
+
+summary(res_MYC)
+```
+### Deseq2 model with interaction term:
+#### MYC - volcano plot
+
+```{r}
+#Colours for volcano plot points
+cols <- c("down" = "RoyalBlue", "up" = "red2", "not_sig" = "lightgrey")
+
+# Remove NAs and add factor for volcano plot up/down/not sig colouring
+res_MYC_volc <- res_MYC_anno %>%
+  na.omit() %>%
+  mutate(Group = case_when(log2FoldChange <= 0 & padj <= 0.05 ~ "down",
+                           log2FoldChange >= 0 &  padj <= 0.05 ~  "up",
+                           padj >= 0.05 ~ "not_sig"))
+
+# Labels for top ten most significant genes
+res_MYC_labs <- res_MYC_volc %>%
+  slice_min(padj, n = 10)
+
+res_MYC_plot <- ggplot(data = res_MYC_volc, aes(log2FoldChange, -log10(padj), colour=Group)) +
+  geom_point(alpha=0.8) +
+  geom_hline(yintercept=1.301029996, colour="grey", linetype="dashed") +
+  geom_vline(xintercept=0, colour="grey", linetype="dashed") +
+  xlab(paste0("Log fold-change")) +
+  ylab(paste0("-Log10(adjusted p value)")) + 
+  ggtitle("MYC in interaction model") +
+  theme_classic()+
+  scale_colour_manual(values= cols) +
+  geom_text_repel(data = res_MYC_labs, 
+                  aes(label = GeneSymbol), 
+                  size = 3, 
+                  box.padding = 0.3,
+                  point.padding = 0.5,
+                  max.overlaps = 10,
+                  min.segment.length = 0) +
+  coord_cartesian(xlim = c(-max(abs(res_MYC_volc$log2FoldChange)),
+                           max(abs(res_MYC_volc$log2FoldChange))))
+
+# Print to notebook
+print(res_MYC_plot)
+
+# Save the plot as PNG
+ggsave("output/volcano_res_MYC.png", res_MYC_plot, width = 6, height = 4, dpi = 300)
+
+# Save the plot as PDF
+ggsave("output/volcano_res_MYC.pdf", res_MYC_plot, width = 6, height = 4)
+```
+
+### Deseq2 model with interaction term:
+#### SAEi
+
+```{r}
+res_SAE2i <- results(dds_interaction, name = "Treatment_SAE2i_vs_DMSO")
+
+#Add gene name annotations and write to CSV file
+res_SAE2i_anno <- res_SAE2i %>%
+  as.data.frame() %>%
+  mutate(GeneID = rownames(.)) %>%
+  right_join(gene_anno, by = "GeneID") %>%
+  column_to_rownames(var = "GeneID") %T>%
+  write.csv(file = "output/differential_expression_interaction_analysis/results_interaction_SAEi.csv")
+
+#print summary of results to console
+summary(res_SAE2i)
+```
+### Deseq2 model with interaction term:
+#### SAEi - volcano plot
+
+```{r}
+#Colours for volcano plot points
+cols <- c("down" = "RoyalBlue", "up" = "red2", "not_sig" = "lightgrey")
+
+# Remove NAs and add factor for volcano plot up/down/not sig colouring
+res_SAE2i_volc <- res_SAE2i_anno %>%
+  na.omit() %>%
+  mutate(Group = case_when(log2FoldChange <= 0 & padj <= 0.05 ~ "down",
+                           log2FoldChange >= 0 &  padj <= 0.05 ~  "up",
+                           padj >= 0.05 ~ "not_sig"))
+
+# Labels for top ten most significant genes
+res_SAE2i_labs <- res_SAE2i_volc %>%
+  slice_min(padj, n = 10)
+
+res_SAE2i_plot <- ggplot(data = res_SAE2i_volc, aes(log2FoldChange, -log10(padj), colour=Group)) +
+  geom_point(alpha=0.8) +
+  geom_hline(yintercept=1.301029996, colour="grey", linetype="dashed") +
+  geom_vline(xintercept=0, colour="grey", linetype="dashed") +
+  xlab(paste0("Log fold-change")) +
+  ylab(paste0("-Log10(adjusted p value)")) + 
+  ggtitle("High MYC SAE2i versus DMSO") +
+  theme_classic()+
+  scale_colour_manual(values= cols) +
+  geom_text_repel(data = res_SAE2i_labs, 
+                  aes(label = GeneSymbol), 
+                  size = 3, 
+                  box.padding = 0.3, 
+                  point.padding = 0.5, 
+                  max.overlaps = 10,
+                  min.segment.length = 0) +
+  coord_cartesian(xlim = c(-max(abs(res_SAE2i_volc$log2FoldChange)),
+                           max(abs(res_SAE2i_volc$log2FoldChange))))
+
+# Print to notebook
+print(res_SAE2i_plot)
+
+# Save the plot as PNG
+ggsave("output/volcano_res_SAE2i.png", res_SAE2i_plot, width = 6, height = 4, dpi = 300)
+
+# Save the plot as PDF
+ggsave("output/volcano_res_SAE2i.pdf", res_SAE2i_plot, width = 6, height = 4)
+```
+
+
+
+### Interaction effect
+```{r}
+res_interaction <- results(dds_interaction, name = "MYCHigh.TreatmentSAE2i", alpha=0.05)
+summary(res_interaction)
+```
+
+###interaction effect genes
+#### Heatmap of interaction effect genes
+
+```{r}
+vsd <- vst(dds_interaction)
+
+vsd_df <- as.data.frame(vsd@assays@data@listData[[1]])
+
+res_interaction_df <- na.omit(as.data.frame(res_interaction))
+res_interaction_df <- merge(gene_anno, res_interaction_df, by=0)
+row.names(res_interaction_df) <- res_interaction_df[,1]
+res_interaction_df <- res_interaction_df[,-1:-2]
+res_interaction_df_filtered <- res_interaction_df %>%
+  filter(padj <= 0.05) %>%
+  select(GeneSymbol) %>%
+  rownames_to_column(var = "ENSG")
+
+res_interaction_vsd <- vsd_df %>%
+  rownames_to_column(var = "ENSG") %>%
+  inner_join(res_interaction_df_filtered, by = "ENSG") %>%
+  column_to_rownames(var = "GeneSymbol") %>%
+  select(-ENSG) %>%
+  as.matrix()
+  
+res_interaction_vsd_zscore <- t(scale(t(res_interaction_vsd)))
+
+column_order_df <- data.frame(Sample = colnames(res_interaction_vsd_zscore),
+                              MYC = targets$MYC,
+                              Treatment = targets$Treatment)
+
+column_order_df <- column_order_df %>%
+  arrange(desc(MYC), Treatment)
+
+res_interaction_vsd_zscore <- res_interaction_vsd_zscore[, column_order_df$Sample]
+
+top_annotation <- HeatmapAnnotation(MYC = column_order_df$MYC,
+                                    Treatment = column_order_df$Treatment,
+                                    col = list(MYC = c("High" = "red2", "Low" = "royalblue"),
+                                               Treatment = c("SAE2i" = "darkorchid2", "DMSO" = "springgreen2")))
+set.seed(123)
+
+Heatmap(res_interaction_vsd_zscore,
+  name = "Z-score",
+  top_annotation = top_annotation,
+  show_row_names = FALSE,
+  show_column_names = FALSE,
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  row_km = 4)
+```
